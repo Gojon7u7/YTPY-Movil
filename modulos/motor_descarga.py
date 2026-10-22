@@ -7,9 +7,9 @@ import yt_dlp
 
 class MotorDescargaMovil:
     """
-    Motor completo de extracción y descarga para Android 10+ y PC.
-    Conecta automáticamente deno.exe en PC, libffmpeg.so en Android y
-    ejecuta un escudo en cascada para garantizar 1080p/60FPS y 4K.
+    Motor de extracción y descarga para Android 10+ y PC.
+    Enlaza libffmpeg.so y libdeno.so en Android y aísla los clientes
+    para evitar el error 'The page needs to be reloaded'.
     """
 
     def __init__(self, ruta_datos_privados: str):
@@ -20,21 +20,16 @@ class MotorDescargaMovil:
             or (sys.platform == "linux" and os.path.exists("/storage/emulated/0"))
         )
 
-        # CRÍTICO EN PC: Inyectar la carpeta Scripts del .venv en el PATH para que yt-dlp
-        # encuentre siempre a deno.exe y desbloquee 1080p/4K al ejecutar desde VS Code
+        # En PC: asegurar que la carpeta Scripts del entorno virtual esté en el PATH
         carpeta_scripts_venv = os.path.dirname(sys.executable)
         if carpeta_scripts_venv and carpeta_scripts_venv not in os.environ.get("PATH", ""):
             os.environ["PATH"] = carpeta_scripts_venv + os.pathsep + os.environ.get("PATH", "")
 
         self.ruta_descargas = self._configurar_carpeta_descargas()
         self.ruta_archivo_cookies = os.path.join(self.ruta_datos_privados, "cookies_youtube.txt")
-        self.ruta_ffmpeg = self._localizar_ffmpeg()
+        self.ruta_ffmpeg = self._configurar_binarios_nativos()
 
     def _configurar_carpeta_descargas(self) -> str:
-        """
-        En Android intenta usar la carpeta pública Download/YTPY. Si el sistema
-        restringe el acceso, verifica que realmente sea escribible.
-        """
         if self.es_android:
             rutas_candidatas = [
                 "/storage/emulated/0/Download/YTPY",
@@ -55,24 +50,50 @@ class MotorDescargaMovil:
         os.makedirs(ruta_local, exist_ok=True)
         return ruta_local
 
-    def _localizar_ffmpeg(self) -> str:
+    def _configurar_binarios_nativos(self) -> str:
         """
-        En Android localiza libffmpeg.so en la carpeta nativa del APK y la añade al PATH.
-        En PC localiza ffmpeg.exe en el sistema o en los paquetes de Winget.
+        En Android localiza la carpeta nativa (/data/app/.../lib/arm64) donde están
+        libffmpeg.so y libdeno.so, y crea enlaces simbólicos llamados 'ffmpeg' y 'deno'
+        para que yt-dlp los reconozca por su nombre estándar.
         """
         if self.es_android and os.path.exists("/proc/self/maps"):
             try:
+                carpeta_nativa = None
                 with open("/proc/self/maps", "r", encoding="utf-8") as mapa:
                     for linea in mapa:
                         if "/lib/" in linea and ".so" in linea:
-                            partes = linea.strip().split(" ")
-                            ruta_so = partes[-1]
-                            carpeta_nativa = os.path.dirname(ruta_so)
-                            posible_ffmpeg = os.path.join(carpeta_nativa, "libffmpeg.so")
-                            if os.path.exists(posible_ffmpeg):
-                                if carpeta_nativa not in os.environ.get("PATH", ""):
-                                    os.environ["PATH"] = carpeta_nativa + os.pathsep + os.environ.get("PATH", "")
-                                return posible_ffmpeg
+                            ruta_so = linea.strip().split(" ")[-1]
+                            posible_dir = os.path.dirname(ruta_so)
+                            if os.path.exists(os.path.join(posible_dir, "libffmpeg.so")):
+                                carpeta_nativa = posible_dir
+                                break
+
+                if carpeta_nativa:
+                    # Crear carpeta puente con enlaces simbólicos llamados 'ffmpeg' y 'deno'
+                    carpeta_puente = os.path.join(self.ruta_datos_privados, "bin_puente")
+                    os.makedirs(carpeta_puente, exist_ok=True)
+
+                    origen_ffmpeg = os.path.join(carpeta_nativa, "libffmpeg.so")
+                    enlace_ffmpeg = os.path.join(carpeta_puente, "ffmpeg")
+                    if os.path.exists(origen_ffmpeg):
+                        if os.path.lexists(enlace_ffmpeg):
+                            os.remove(enlace_ffmpeg)
+                        os.symlink(origen_ffmpeg, enlace_ffmpeg)
+
+                    origen_deno = os.path.join(carpeta_nativa, "libdeno.so")
+                    enlace_deno = os.path.join(carpeta_puente, "deno")
+                    if os.path.exists(origen_deno):
+                        if os.path.lexists(enlace_deno):
+                            os.remove(enlace_deno)
+                        os.symlink(origen_deno, enlace_deno)
+
+                    for dir_bin in [carpeta_puente, carpeta_nativa]:
+                        if dir_bin not in os.environ.get("PATH", ""):
+                            os.environ["PATH"] = dir_bin + os.pathsep + os.environ.get("PATH", "")
+
+                    if os.path.exists(enlace_ffmpeg):
+                        return enlace_ffmpeg
+                    return origen_ffmpeg
             except Exception:
                 pass
 
@@ -91,15 +112,10 @@ class MotorDescargaMovil:
         return None
 
     def _limpiar_enlace_youtube(self, enlace: str) -> str:
-        """
-        Limpia parámetros de rastreo (?si=...) de los enlaces compartidos desde
-        la app móvil de YouTube para evitar fallos de extracción.
-        """
         enlace = enlace.strip()
         coincidencia_corta = re.search(r'youtu\.be/([a-zA-Z0-9_-]{11})', enlace)
         if coincidencia_corta:
-            video_id = coincidencia_corta.group(1)
-            return f"https://www.youtube.com/watch?v={video_id}"
+            return f"https://www.youtube.com/watch?v={coincidencia_corta.group(1)}"
         return enlace
 
     def guardar_cookies_texto(self, contenido_netscape: str):
@@ -114,38 +130,45 @@ class MotorDescargaMovil:
 
     def _ejecutar_con_escudo_antibloqueo(self, enlace_url: str, opciones_base: dict, descargar: bool):
         """
-        Ejecuta una cascada de estrategias verificando que realmente se desbloqueen
-        las resoluciones de Alta Definición (720p / 1080p / 60FPS / 4K) y no solo 360p.
+        Prueba cada cliente de forma individual y aislada (sin mezclar con tv_embedded)
+        para que ningún cliente secundario dispare 'The page needs to be reloaded'.
         """
         enlace_limpio = self._limpiar_enlace_youtube(enlace_url)
 
         estrategias = [
-            # Estrategia 1: Cliente Android VR + Web (Desbloquea 1080p 60FPS en Android y PC sin PO Token)
+            # Estrategia 1: android_vr en solitario (Desbloquea 1080p/60FPS directo en Android y PC)
             {
                 'extractor_args': {
                     'youtube': {
-                        'player_client': ['android_vr', 'web', 'tv_embedded']
+                        'player_client': ['android_vr']
                     }
                 }
             },
-            # Estrategia 2: Cliente nativo por defecto (En PC usa Deno automáticamente)
+            # Estrategia 2: Cliente nativo con Deno en segundo plano
             {},
-            # Estrategia 3: Clientes alternativos para videos restringidos
+            # Estrategia 3: Cliente Android Creator en solitario
             {
                 'extractor_args': {
                     'youtube': {
-                        'player_client': ['tv', 'mweb', 'android_creator']
+                        'player_client': ['android_creator']
+                    }
+                }
+            },
+            # Estrategia 4: Cliente Web Móvil (mweb) en solitario
+            {
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['mweb']
                     }
                 }
             },
         ]
 
-        # En PC, añadir como último respaldo las cookies de Firefox
         if not self.es_android:
             estrategias.append({'cookiesfrombrowser': ('firefox',)})
 
         ultimo_error = None
-        info_respaldo_360p = None
+        info_respaldo = None
 
         for config_extra in estrategias:
             opciones = dict(opciones_base)
@@ -161,20 +184,21 @@ class MotorDescargaMovil:
                         return info
 
                     if info and info.get('formats'):
-                        # Comprobar si esta estrategia desbloqueó resoluciones HD (>= 720p)
-                        tiene_hd = any(
-                            (f.get('height') or 0) >= 720 and f.get('vcodec', 'none') != 'none'
-                            for f in info.get('formats', [])
-                        )
+                        formatos_validos = [
+                            f for f in info.get('formats', [])
+                            if f.get('height') is not None and f.get('vcodec', 'none') != 'none'
+                        ]
+                        tiene_hd = any((f.get('height') or 0) >= 720 for f in formatos_validos)
                         if tiene_hd:
                             return info
-                        info_respaldo_360p = info
+                        if formatos_validos and not info_respaldo:
+                            info_respaldo = info
             except Exception as error:
                 ultimo_error = error
                 continue
 
-        if info_respaldo_360p:
-            return info_respaldo_360p
+        if info_respaldo:
+            return info_respaldo
         raise ultimo_error or Exception("No se pudieron obtener los formatos del video.")
 
     def obtener_informacion_video(self, enlace_url: str) -> dict:
@@ -294,7 +318,6 @@ class MotorDescargaMovil:
                 }]
                 opciones['outtmpl'] = os.path.join(self.ruta_descargas, f'%(title)s [MP3 {valor_calidad}kbps].%(ext)s')
             else:
-                # Si en algún emulador no cargó FFmpeg, descarga el audio directo en m4a sin dar error
                 opciones['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
                 opciones['outtmpl'] = os.path.join(self.ruta_descargas, '%(title)s [Audio].%(ext)s')
 
