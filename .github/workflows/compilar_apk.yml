@@ -1,4 +1,4 @@
-name: Compilar YTPY Android APK (con FFmpeg y Deno ARM64)
+name: Compilar YTPY Android APK (con FFmpeg y FFprobe ARM64)
 
 on:
   workflow_dispatch:
@@ -37,7 +37,7 @@ jobs:
           pip install flet==0.25.2
           flet build apk --project "YTPY Studio" --description "Descargador Profesional MP4 MP3 FLAC" --android-permissions android.permission.READ_EXTERNAL_STORAGE=True android.permission.WRITE_EXTERNAL_STORAGE=True android.permission.MANAGE_EXTERNAL_STORAGE=True --no-rich-output
 
-      - name: 6. Inyectar FFmpeg ARM64 (libffmpeg.so) y Deno ARM64 (libdeno.so)
+      - name: 6. Inyectar FFmpeg y FFprobe estáticos ARM64 (libffmpeg.so y libffprobe.so)
         run: |
           sudo apt-get update && sudo apt-get install -y wget xz-utils zip unzip
           
@@ -46,14 +46,10 @@ jobs:
           sudo wget https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O /usr/local/bin/apktool.jar
           sudo chmod +x /usr/local/bin/apktool
 
-          # 1. Descargar binario estático de FFmpeg para Android ARM64
+          # Descargar binarios 100% estáticos de FFmpeg y FFprobe para ARM64 (no requieren glibc)
           wget -q https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz
           tar -xf ffmpeg-release-arm64-static.tar.xz
           CARPETA_FFMPEG=$(find . -maxdepth 1 -type d -name "ffmpeg-*-arm64-static" | head -n 1)
-
-          # 2. Descargar motor JavaScript Deno para ARM64 (resuelve firmas de 1080p/4K en segundo plano)
-          wget -q https://github.com/denoland/deno/releases/latest/download/deno-aarch64-unknown-linux-gnu.zip -O deno_arm64.zip
-          unzip -q deno_arm64.zip -d deno_extraido
 
           # Desempaquetar el APK generado por Flet
           APK_ORIGINAL=$(find build/apk -name "*.apk" | head -n 1)
@@ -64,12 +60,12 @@ jobs:
           sed -i 's/android:requestLegacyExternalStorage="[^"]*"//g' apk_modificado/AndroidManifest.xml
           sed -i 's/<application/<application android:extractNativeLibs="true" android:requestLegacyExternalStorage="true"/g' apk_modificado/AndroidManifest.xml
 
-          # Inyectar FFmpeg y Deno como librerías nativas ejecutables
+          # Inyectar tanto ffmpeg como ffprobe en la partición ejecutable de Android
           mkdir -p apk_modificado/lib/arm64-v8a
           cp "$CARPETA_FFMPEG/ffmpeg" apk_modificado/lib/arm64-v8a/libffmpeg.so
-          cp "deno_extraido/deno" apk_modificado/lib/arm64-v8a/libdeno.so
+          cp "$CARPETA_FFMPEG/ffprobe" apk_modificado/lib/arm64-v8a/libffprobe.so
           chmod 755 apk_modificado/lib/arm64-v8a/libffmpeg.so
-          chmod 755 apk_modificado/lib/arm64-v8a/libdeno.so
+          chmod 755 apk_modificado/lib/arm64-v8a/libffprobe.so
 
           # Reconstruir y firmar el APK
           apktool b --use-aapt2 apk_modificado -o ytpy_sin_firmar.apk
