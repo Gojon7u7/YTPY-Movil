@@ -41,8 +41,9 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y wget xz-utils zip unzip
           
+          # Descargar Apktool directamente desde GitHub Releases (URL estable y permanente)
           sudo wget https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O /usr/local/bin/apktool
-          sudo wget https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar -O /usr/local/bin/apktool.jar
+          sudo wget https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O /usr/local/bin/apktool.jar
           sudo chmod +x /usr/local/bin/apktool
 
           wget -q https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz
@@ -67,7 +68,7 @@ jobs:
 
           "$ZIPALIGN" -p -f 4 ytpy_sin_firmar.apk ytpy_alineado.apk
 
-          keytool -genkey -v -keystore llave_ytpy.jks -keyalg RSA -keysize 2048 -validity 10000 -alias ytpy -storepass ytpy1234 -key-pass ytpy1234 "CN=YTPY Studio, OU=Dev, O=YTPY, L=Latam, S=Latam, C=VE"
+          keytool -genkey -v -keystore llave_ytpy.jks -keyalg RSA -keysize 2048 -validity 10000 -alias ytpy -storepass ytpy1234 -key-pass ytpy1234 -dname "CN=YTPY Studio, OU=Dev, O=YTPY, L=Latam, S=Latam, C=VE"
           "$APKSIGNER" sign --ks llave_ytpy.jks --ks-pass pass:ytpy1234 --key-pass pass:ytpy1234 --out YTPY_Studio_Android.apk ytpy_alineado.apk
 
       - name: 7. Subir APK listo para descargar
