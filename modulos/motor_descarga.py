@@ -7,8 +7,7 @@ import yt_dlp
 
 class MotorDescargaMovil:
     """
-    Motor de extracción y descarga adaptado para Android 10+ y PC.
-    Incluye evasión de bloqueos de YouTube y detección de libffmpeg.so.
+    Motor de extracción y descarga anti-bloqueo optimizado para Android 10+ y PC.
     """
 
     def __init__(self, ruta_datos_privados: str):
@@ -24,43 +23,30 @@ class MotorDescargaMovil:
         self.ruta_ffmpeg = self._localizar_ffmpeg()
 
     def _configurar_carpeta_descargas(self) -> str:
-        """
-        Apunta a la carpeta pública 'Download/YTPY' en Android para que los videos
-        y canciones aparezcan de inmediato en la Galería y reproductores del móvil.
-        """
         if self.es_android:
-            ruta_publica = "/storage/emulated/0/Download/YTPY"
             try:
+                ruta_publica = "/storage/emulated/0/Download/YTPY"
                 os.makedirs(ruta_publica, exist_ok=True)
                 return ruta_publica
             except Exception:
                 pass
-
-        # Respaldo o modo prueba en PC
         ruta_local = os.path.join(self.ruta_datos_privados, "descargas")
         os.makedirs(ruta_local, exist_ok=True)
         return ruta_local
 
     def _localizar_ffmpeg(self) -> str:
-        """
-        En Android 10+, rastrea la carpeta nativa del APK (/data/app/.../lib/arm64/)
-        usando /proc/self/maps para encontrar el binario 'libffmpeg.so'.
-        """
         if self.es_android and os.path.exists("/proc/self/maps"):
             try:
                 with open("/proc/self/maps", "r", encoding="utf-8") as mapa:
                     for linea in mapa:
                         if "/lib/arm64" in linea and ".so" in linea:
-                            partes = linea.strip().split(" ")
-                            ruta_so = partes[-1]
-                            carpeta_nativa = os.path.dirname(ruta_so)
-                            posible_ffmpeg = os.path.join(carpeta_nativa, "libffmpeg.so")
+                            ruta_so = linea.strip().split(" ")[-1]
+                            posible_ffmpeg = os.path.join(os.path.dirname(ruta_so), "libffmpeg.so")
                             if os.path.exists(posible_ffmpeg):
                                 return posible_ffmpeg
             except Exception:
                 pass
 
-        # En PC (durante pruebas locales) busca en el sistema o Winget
         ruta_sistema = shutil.which("ffmpeg")
         if ruta_sistema:
             return ruta_sistema
@@ -74,7 +60,6 @@ class MotorDescargaMovil:
         return None
 
     def guardar_cookies_texto(self, contenido_netscape: str):
-        """Guarda cookies en formato Netscape para desbloquear videos +18 o restringidos."""
         with open(self.ruta_archivo_cookies, "w", encoding="utf-8") as archivo:
             archivo.write(contenido_netscape.strip())
 
@@ -84,84 +69,36 @@ class MotorDescargaMovil:
     def _limpiar_ansi(self, texto: str) -> str:
         return re.compile(r'\x1b\[[0-9;]*m').sub('', str(texto)).strip()
 
-    def _ejecutar_con_escudo_antibloqueo(self, enlace_url: str, opciones_base: dict, descargar: bool):
-        """
-        Prueba múltiples identidades de cliente para evitar 'Acceso Denegado',
-        'Sign in to confirm you are not a bot' o el límite de 360p.
-        """
-        estrategias_clientes = [
-            # Estrategia 1: Cliente Android VR + TV Embedded (desbloquea 1080p/4K sin PO Token)
-            {
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['android_vr', 'tv_embedded']
-                    }
-                }
-            },
-            # Estrategia 2: Clientes móviles iOS + MWeb
-            {
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['ios', 'mweb']
-                    }
-                }
-            },
-            # Estrategia 3: Cliente Android Creator / Web estándar
-            {
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['android_creator', 'web']
-                    }
-                }
-            }
-        ]
-
-        ultimo_error = None
-        info_respaldo = None
-
-        for estrategia in estrategias_clientes:
-            opciones = dict(opciones_base)
-            opciones.update(estrategia)
-
-            # Si el usuario cargó cookies para videos +18, inyectarlas
-            if self.tiene_cookies_configuradas():
-                opciones['cookiefile'] = self.ruta_archivo_cookies
-
-            try:
-                with yt_dlp.YoutubeDL(opciones) as extractor:
-                    info = extractor.extract_info(enlace_url, download=descargar)
-                    if descargar:
-                        return info
-
-                    if info and info.get('formats'):
-                        hay_hd = any((f.get('height') or 0) >= 720 for f in info.get('formats', []))
-                        if hay_hd:
-                            return info
-                        info_respaldo = info
-            except Exception as error:
-                ultimo_error = error
-                continue
-
-        if info_respaldo:
-            return info_respaldo
-        raise ultimo_error or Exception("No se pudo conectar con el video.")
-
-    def obtener_informacion_video(self, enlace_url: str) -> dict:
+    def _obtener_opciones_base(self) -> dict:
         opciones = {
             'quiet': True,
             'no_warnings': True,
-            'extract_flat': False,
             'noplaylist': True,
-            'ignore_no_formats_error': True,
             'socket_timeout': 30,
-            'retries': 10,
+            'retries': 15,
+            'fragment_retries': 15,
             'nocheckcertificate': True,
+            # Forzar cliente android_creator y web para evitar error 403 y restricciones de formato
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android_creator', 'web', 'mweb']
+                }
+            }
         }
-
         if self.ruta_ffmpeg:
             opciones['ffmpeg_location'] = self.ruta_ffmpeg
+        if self.tiene_cookies_configuradas():
+            opciones['cookiefile'] = self.ruta_archivo_cookies
+        return opciones
 
-        info = self._ejecutar_con_escudo_antibloqueo(enlace_url, opciones, descargar=False)
+    def obtener_informacion_video(self, enlace_url: str) -> dict:
+        opciones = self._obtener_opciones_base()
+        opciones['extract_flat'] = False
+        opciones['ignore_no_formats_error'] = True
+
+        with yt_dlp.YoutubeDL(opciones) as extractor:
+            info = extractor.extract_info(enlace_url, download=False)
+
         formatos = info.get('formats', [])
         mapa_resoluciones = {}
 
@@ -220,22 +157,11 @@ class MotorDescargaMovil:
             elif datos['status'] == 'finished':
                 funcion_progreso(1.0, "---", "00:00", "Procesando archivo final con FFmpeg...")
 
-        opciones = {
-            'noplaylist': True,
-            'overwrites': True,
-            'progress_hooks': [gancho_progreso],
-            'quiet': True,
-            'no_warnings': True,
-            'nocolor': True,
-            'nocheckcertificate': True,
-            'socket_timeout': 30,
-            'retries': 15,
-            'fragment_retries': 15,
-            'continuedl': True,
-        }
-
-        if self.ruta_ffmpeg:
-            opciones['ffmpeg_location'] = self.ruta_ffmpeg
+        opciones = self._obtener_opciones_base()
+        opciones['overwrites'] = True
+        opciones['progress_hooks'] = [gancho_progreso]
+        opciones['nocolor'] = True
+        opciones['continuedl'] = True
 
         if modo_formato == "MP4":
             altura = int(valor_calidad)
@@ -269,7 +195,8 @@ class MotorDescargaMovil:
             opciones['outtmpl'] = os.path.join(self.ruta_descargas, '%(title)s [FLAC Lossless].%(ext)s')
 
         try:
-            self._ejecutar_con_escudo_antibloqueo(enlace_url, opciones, descargar=True)
+            with yt_dlp.YoutubeDL(opciones) as ydl:
+                ydl.download([enlace_url])
             funcion_completado(self.ruta_descargas)
         except Exception as e:
             funcion_error(self._limpiar_ansi(str(e)))
