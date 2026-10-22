@@ -414,9 +414,11 @@ def main(pagina: ft.Page):
     )
 
     pagina.add(
-        ft.Column(
-            spacing=12,
-            controls=[encabezado, tarjeta_busqueda, tarjeta_central, tarjeta_progreso],
+        ft.SafeArea(
+            content=ft.Column(
+                spacing=12,
+                controls=[encabezado, tarjeta_busqueda, tarjeta_central, tarjeta_progreso],
+            )
         )
     )
 
