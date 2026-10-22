@@ -5,9 +5,10 @@ import shutil
 import subprocess
 
 # =============================================================================
-# INTERCEPTOR PREVIO A IMPORTAR YT-DLP (CRÍTICO PARA QUE YT_DLP.UTILS.POPEN LO HEREDE)
+# INTERCEPTOR DE SUBPROCESOS (ANTES DE IMPORTAR YT-DLP)
 # =============================================================================
 _POPEN_ORIGINAL = subprocess.Popen
+_ACCESO_ORIGINAL = os.access
 _MAPA_BINARIOS_ANDROID = {
     "ffmpeg": None,
     "ffprobe": None,
@@ -26,17 +27,24 @@ class _PopenPuenteGlobal(_POPEN_ORIGINAL):
         super().__init__(args, *pargs, **kwargs)
 
 
-subprocess.Popen = _PopenPuenteGlobal
+def _acceso_puente_global(ruta, modo, *args, **kwargs):
+    nombre = os.path.basename(str(ruta)).lower()
+    if nombre in ("ffmpeg", "ffprobe", "libffmpeg.so", "libffprobe.so"):
+        return True
+    return _ACCESO_ORIGINAL(ruta, modo, *args, **kwargs)
 
-# Ahora importamos yt_dlp para que su clase interna Popen herede de _PopenPuenteGlobal
+
+subprocess.Popen = _PopenPuenteGlobal
+os.access = _acceso_puente_global
+
+# Importar yt_dlp DESPUÉS de asignar subprocess.Popen para que herede el puente
+# manteniendo intacto su método interno Popen.run()
 import yt_dlp
-import yt_dlp.utils._utils as _yt_utils
-_yt_utils.Popen = _PopenPuenteGlobal
 
 
 class MotorDescargaMovil:
     """
-    Motor de extracción y descarga para Android 10+ y PC.
+    Motor de extracción y descarga para Android 10+ (ARM64 y Emulador x86_64) y PC.
     """
 
     def __init__(self, ruta_datos_privados: str):
@@ -44,7 +52,7 @@ class MotorDescargaMovil:
         self.es_android = (
             "ANDROID_ARGUMENT" in os.environ
             or "ANDROID_ROOT" in os.environ
-            or (sys.platform == "linux" and os.path.exists("/storage/emulated/0"))
+            or (sys.platform == "linux" and os.path.exists("/data/user/0"))
         )
 
         if not self.es_android:
@@ -79,40 +87,36 @@ class MotorDescargaMovil:
 
     def _buscar_carpeta_lib_android(self) -> str:
         """
-        Busca la carpeta nativa donde Android extrajo libffmpeg.so y libffprobe.so.
+        Rastrea la carpeta de instalación de la app en /data/app/ para encontrar
+        libffmpeg.so sin importar si es ARM64 (celular) o x86_64 (emulador LDPlayer).
         """
-        posibles_directorios = set()
+        raices_app = set()
 
         if os.path.exists("/proc/self/maps"):
             try:
                 with open("/proc/self/maps", "r", encoding="utf-8") as mapa:
                     for linea in mapa:
                         if "/data/app/" in linea:
-                            ruta = linea.strip().split(" ")[-1]
-                            if "!" in ruta:
-                                ruta = ruta.split("!")[0]
-                            dir_actual = os.path.dirname(ruta)
-                            posibles_directorios.add(dir_actual)
-                            posibles_directorios.add(os.path.join(dir_actual, "lib", "arm64"))
-                            posibles_directorios.add(os.path.join(dir_actual, "lib", "arm64-v8a"))
-                            dir_padre = os.path.dirname(dir_actual)
-                            posibles_directorios.add(os.path.join(dir_padre, "lib", "arm64"))
+                            partes = linea.strip().split(" ")
+                            ruta = partes[-1].split("!")[0]
+                            # Subir hasta encontrar la carpeta que contiene base.apk o lib
+                            actual = os.path.dirname(ruta)
+                            for _ in range(4):
+                                if os.path.basename(actual).startswith("com.flet") or os.path.exists(os.path.join(actual, "lib")):
+                                    raices_app.add(actual)
+                                actual = os.path.dirname(actual)
             except Exception:
                 pass
 
-        for directorio in posibles_directorios:
-            if os.path.exists(os.path.join(directorio, "libffmpeg.so")):
-                return directorio
+        for raiz in raices_app:
+            for dir_actual, _, archivos in os.walk(raiz):
+                if "libffmpeg.so" in archivos:
+                    return dir_actual
         return None
 
     def _configurar_binarios_nativos(self) -> str:
-        """
-        Configura los enlaces simbólicos limpios para ffmpeg y ffprobe en Android,
-        eliminando cualquier archivo residual antiguo (como deno roto).
-        """
         if self.es_android:
             try:
-                # Limpiar por completo la carpeta puente para borrar enlaces viejos rotos
                 carpeta_puente = os.path.join(self.ruta_datos_privados, "bin_puente")
                 shutil.rmtree(carpeta_puente, ignore_errors=True)
                 os.makedirs(carpeta_puente, exist_ok=True)
@@ -156,10 +160,6 @@ class MotorDescargaMovil:
         return None
 
     def _limpiar_enlace_youtube(self, enlace: str) -> str:
-        """
-        Convierte cualquier variante (m.youtube.com, youtu.be, shorts) en un enlace
-        estándar limpio sin parámetros de seguimiento.
-        """
         enlace = enlace.strip()
         coincidencia = re.search(r'(?:v=|youtu\.be/|shorts/|embed/)([a-zA-Z0-9_-]{11})', enlace)
         if coincidencia:
@@ -180,7 +180,6 @@ class MotorDescargaMovil:
         enlace_limpio = self._limpiar_enlace_youtube(enlace_url)
 
         estrategias = [
-            # Estrategia 1: android_vr (Entrega todos los flujos DASH 1080p/4K y audio sin requerir JS/Deno)
             {
                 'extractor_args': {
                     'youtube': {
@@ -188,7 +187,6 @@ class MotorDescargaMovil:
                     }
                 }
             },
-            # Estrategia 2: ios (Respaldo móvil directo)
             {
                 'extractor_args': {
                     'youtube': {
@@ -196,7 +194,6 @@ class MotorDescargaMovil:
                     }
                 }
             },
-            # Estrategia 3: android_creator
             {
                 'extractor_args': {
                     'youtube': {
@@ -204,7 +201,6 @@ class MotorDescargaMovil:
                     }
                 }
             },
-            # Estrategia 4: Cliente web por defecto
             {},
         ]
 
@@ -248,10 +244,9 @@ class MotorDescargaMovil:
 
         if info_respaldo:
             return info_respaldo
-        raise ultimo_error or Exception("YouTube bloqueó temporalmente la consulta. Intenta de nuevo.")
+        raise ultimo_error or Exception("No se pudieron obtener los formatos del video.")
 
     def obtener_informacion_video(self, enlace_url: str) -> dict:
-        # En el análisis NO pasamos ffmpeg_location ni ignore_no_formats_error
         opciones = {
             'quiet': True,
             'no_warnings': True,
@@ -310,6 +305,9 @@ class MotorDescargaMovil:
         funcion_completado,
         funcion_error
     ):
+        # Reintentar actualizar carpeta de descargas por si el usuario acaba de dar permisos en Ajustes
+        self.ruta_descargas = self._configurar_carpeta_descargas()
+
         def gancho_progreso(datos):
             if datos['status'] == 'downloading':
                 descargado = datos.get('downloaded_bytes', 0)
