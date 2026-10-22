@@ -1,20 +1,42 @@
 import os
 import re
 import sys
-import stat
 import shutil
 import subprocess
-import yt_dlp
 
-
+# =============================================================================
+# INTERCEPTOR PREVIO A IMPORTAR YT-DLP (CRÍTICO PARA QUE YT_DLP.UTILS.POPEN LO HEREDE)
+# =============================================================================
 _POPEN_ORIGINAL = subprocess.Popen
+_MAPA_BINARIOS_ANDROID = {
+    "ffmpeg": None,
+    "ffprobe": None,
+}
+
+
+class _PopenPuenteGlobal(_POPEN_ORIGINAL):
+    def __init__(self, args, *pargs, **kwargs):
+        if isinstance(args, (list, tuple)) and len(args) > 0:
+            ejecutable = str(args[0])
+            nombre_base = os.path.basename(ejecutable).lower()
+            if nombre_base in ("ffmpeg", "libffmpeg.so") and _MAPA_BINARIOS_ANDROID.get("ffmpeg"):
+                args = [_MAPA_BINARIOS_ANDROID["ffmpeg"]] + list(args[1:])
+            elif nombre_base in ("ffprobe", "libffprobe.so") and _MAPA_BINARIOS_ANDROID.get("ffprobe"):
+                args = [_MAPA_BINARIOS_ANDROID["ffprobe"]] + list(args[1:])
+        super().__init__(args, *pargs, **kwargs)
+
+
+subprocess.Popen = _PopenPuenteGlobal
+
+# Ahora importamos yt_dlp para que su clase interna Popen herede de _PopenPuenteGlobal
+import yt_dlp
+import yt_dlp.utils._utils as _yt_utils
+_yt_utils.Popen = _PopenPuenteGlobal
 
 
 class MotorDescargaMovil:
     """
     Motor de extracción y descarga para Android 10+ y PC.
-    Incluye redirección de subprocesos en Android para ejecutar libffmpeg.so
-    y libffprobe.so desde la partición nativa autorizada del APK.
     """
 
     def __init__(self, ruta_datos_privados: str):
@@ -25,13 +47,13 @@ class MotorDescargaMovil:
             or (sys.platform == "linux" and os.path.exists("/storage/emulated/0"))
         )
 
-        carpeta_scripts_venv = os.path.dirname(sys.executable)
-        if carpeta_scripts_venv and carpeta_scripts_venv not in os.environ.get("PATH", ""):
-            os.environ["PATH"] = carpeta_scripts_venv + os.pathsep + os.environ.get("PATH", "")
+        if not self.es_android:
+            carpeta_scripts_venv = os.path.dirname(sys.executable)
+            if carpeta_scripts_venv and carpeta_scripts_venv not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = carpeta_scripts_venv + os.pathsep + os.environ.get("PATH", "")
 
         self.ruta_descargas = self._configurar_carpeta_descargas()
         self.ruta_archivo_cookies = os.path.join(self.ruta_datos_privados, "cookies_youtube.txt")
-        self.mapa_binarios_android = {}
         self.ruta_ffmpeg = self._configurar_binarios_nativos()
 
     def _configurar_carpeta_descargas(self) -> str:
@@ -55,83 +77,61 @@ class MotorDescargaMovil:
         os.makedirs(ruta_local, exist_ok=True)
         return ruta_local
 
-    def _activar_interceptor_popen_android(self, ruta_real_ffmpeg: str, ruta_real_ffprobe: str):
+    def _buscar_carpeta_lib_android(self) -> str:
         """
-        En Android 10+, yt-dlp exige que los archivos se llamen 'ffmpeg' y 'ffprobe',
-        pero Android solo permite ejecutar archivos llamados 'lib*.so' en la carpeta nativa.
-        Este interceptor traduce en tiempo real cualquier llamada de 'ffmpeg' -> 'libffmpeg.so'
-        y 'ffprobe' -> 'libffprobe.so'.
+        Busca la carpeta nativa donde Android extrajo libffmpeg.so y libffprobe.so.
         """
-        class PopenPuenteAndroid(_POPEN_ORIGINAL):
-            def __init__(self_popen, args, *pargs, **kwargs):
-                if isinstance(args, (list, tuple)) and len(args) > 0:
-                    ejecutable = str(args[0])
-                    nombre_base = os.path.basename(ejecutable).lower()
-                    if nombre_base in ("ffmpeg", "libffmpeg.so") and os.path.exists(ruta_real_ffmpeg):
-                        args = [ruta_real_ffmpeg] + list(args[1:])
-                    elif nombre_base in ("ffprobe", "libffprobe.so") and os.path.exists(ruta_real_ffprobe):
-                        args = [ruta_real_ffprobe] + list(args[1:])
-                elif isinstance(args, str):
-                    if "ffmpeg" in args and os.path.exists(ruta_real_ffmpeg):
-                        args = args.replace("ffmpeg", ruta_real_ffmpeg, 1)
-                super().__init__(args, *pargs, **kwargs)
+        posibles_directorios = set()
 
-        subprocess.Popen = PopenPuenteAndroid
+        if os.path.exists("/proc/self/maps"):
+            try:
+                with open("/proc/self/maps", "r", encoding="utf-8") as mapa:
+                    for linea in mapa:
+                        if "/data/app/" in linea:
+                            ruta = linea.strip().split(" ")[-1]
+                            if "!" in ruta:
+                                ruta = ruta.split("!")[0]
+                            dir_actual = os.path.dirname(ruta)
+                            posibles_directorios.add(dir_actual)
+                            posibles_directorios.add(os.path.join(dir_actual, "lib", "arm64"))
+                            posibles_directorios.add(os.path.join(dir_actual, "lib", "arm64-v8a"))
+                            dir_padre = os.path.dirname(dir_actual)
+                            posibles_directorios.add(os.path.join(dir_padre, "lib", "arm64"))
+            except Exception:
+                pass
 
-        # Forzar permisos de lectura/ejecución para el detector os.access de yt-dlp
-        acceso_original = os.access
-
-        def acceso_puente(ruta, modo, *args, **kwargs):
-            nombre = os.path.basename(str(ruta)).lower()
-            if nombre in ("ffmpeg", "ffprobe", "libffmpeg.so", "libffprobe.so"):
-                return True
-            return acceso_original(ruta, modo, *args, **kwargs)
-
-        os.access = acceso_puente
+        for directorio in posibles_directorios:
+            if os.path.exists(os.path.join(directorio, "libffmpeg.so")):
+                return directorio
+        return None
 
     def _configurar_binarios_nativos(self) -> str:
         """
-        Localiza libffmpeg.so y libffprobe.so en Android y prepara la carpeta puente
-        para que yt-dlp supere su validación y ejecute los binarios nativos.
+        Configura los enlaces simbólicos limpios para ffmpeg y ffprobe en Android,
+        eliminando cualquier archivo residual antiguo (como deno roto).
         """
-        if self.es_android and os.path.exists("/proc/self/maps"):
+        if self.es_android:
             try:
-                carpeta_nativa = None
-                with open("/proc/self/maps", "r", encoding="utf-8") as mapa:
-                    for linea in mapa:
-                        if "/lib/" in linea and ".so" in linea:
-                            ruta_so = linea.strip().split(" ")[-1]
-                            posible_dir = os.path.dirname(ruta_so)
-                            if os.path.exists(os.path.join(posible_dir, "libffmpeg.so")):
-                                carpeta_nativa = posible_dir
-                                break
+                # Limpiar por completo la carpeta puente para borrar enlaces viejos rotos
+                carpeta_puente = os.path.join(self.ruta_datos_privados, "bin_puente")
+                shutil.rmtree(carpeta_puente, ignore_errors=True)
+                os.makedirs(carpeta_puente, exist_ok=True)
 
+                carpeta_nativa = self._buscar_carpeta_lib_android()
                 if carpeta_nativa:
                     origen_ffmpeg = os.path.join(carpeta_nativa, "libffmpeg.so")
                     origen_ffprobe = os.path.join(carpeta_nativa, "libffprobe.so")
                     if not os.path.exists(origen_ffprobe):
                         origen_ffprobe = origen_ffmpeg
 
-                    # Crear archivos marcadores llamados exactamente 'ffmpeg' y 'ffprobe'
-                    # (NO symlinks, para que os.path.realpath no les cambie el nombre a .so)
-                    carpeta_puente = os.path.join(self.ruta_datos_privados, "bin_puente")
-                    os.makedirs(carpeta_puente, exist_ok=True)
+                    _MAPA_BINARIOS_ANDROID["ffmpeg"] = origen_ffmpeg
+                    _MAPA_BINARIOS_ANDROID["ffprobe"] = origen_ffprobe
 
-                    for nombre_bin in ("ffmpeg", "ffprobe"):
-                        ruta_marcador = os.path.join(carpeta_puente, nombre_bin)
-                        if os.path.lexists(ruta_marcador):
-                            try:
-                                os.remove(ruta_marcador)
-                            except Exception:
-                                pass
-                        with open(ruta_marcador, "wb") as f:
-                            f.write(b"#!/system/bin/sh\n")
-                        try:
-                            os.chmod(ruta_marcador, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP)
-                        except Exception:
-                            pass
+                    enlace_ffmpeg = os.path.join(carpeta_puente, "ffmpeg")
+                    enlace_ffprobe = os.path.join(carpeta_puente, "ffprobe")
 
-                    self._activar_interceptor_popen_android(origen_ffmpeg, origen_ffprobe)
+                    os.symlink(origen_ffmpeg, enlace_ffmpeg)
+                    os.symlink(origen_ffprobe, enlace_ffprobe)
 
                     if carpeta_puente not in os.environ.get("PATH", ""):
                         os.environ["PATH"] = carpeta_puente + os.pathsep + os.environ.get("PATH", "")
@@ -139,6 +139,7 @@ class MotorDescargaMovil:
                     return carpeta_puente
             except Exception:
                 pass
+            return None
 
         ruta_sistema = shutil.which("ffmpeg")
         if ruta_sistema:
@@ -155,10 +156,14 @@ class MotorDescargaMovil:
         return None
 
     def _limpiar_enlace_youtube(self, enlace: str) -> str:
+        """
+        Convierte cualquier variante (m.youtube.com, youtu.be, shorts) en un enlace
+        estándar limpio sin parámetros de seguimiento.
+        """
         enlace = enlace.strip()
-        coincidencia_corta = re.search(r'youtu\.be/([a-zA-Z0-9_-]{11})', enlace)
-        if coincidencia_corta:
-            return f"https://www.youtube.com/watch?v={coincidencia_corta.group(1)}"
+        coincidencia = re.search(r'(?:v=|youtu\.be/|shorts/|embed/)([a-zA-Z0-9_-]{11})', enlace)
+        if coincidencia:
+            return f"https://www.youtube.com/watch?v={coincidencia.group(1)}"
         return enlace
 
     def guardar_cookies_texto(self, contenido_netscape: str):
@@ -175,7 +180,7 @@ class MotorDescargaMovil:
         enlace_limpio = self._limpiar_enlace_youtube(enlace_url)
 
         estrategias = [
-            # Estrategia 1: android_vr (El cliente que desbloqueó tus 4 calidades en el video)
+            # Estrategia 1: android_vr (Entrega todos los flujos DASH 1080p/4K y audio sin requerir JS/Deno)
             {
                 'extractor_args': {
                     'youtube': {
@@ -183,7 +188,15 @@ class MotorDescargaMovil:
                     }
                 }
             },
-            # Estrategia 2: android_creator
+            # Estrategia 2: ios (Respaldo móvil directo)
+            {
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['ios']
+                    }
+                }
+            },
+            # Estrategia 3: android_creator
             {
                 'extractor_args': {
                     'youtube': {
@@ -191,7 +204,7 @@ class MotorDescargaMovil:
                     }
                 }
             },
-            # Estrategia 3: Cliente nativo por defecto
+            # Estrategia 4: Cliente web por defecto
             {},
         ]
 
@@ -215,42 +228,39 @@ class MotorDescargaMovil:
                         return info
 
                     if info and info.get('formats'):
-                        formatos_validos = [
+                        formatos_video = [
                             f for f in info.get('formats', [])
-                            if f.get('height') is not None and f.get('vcodec', 'none') != 'none'
+                            if (f.get('height') is not None or f.get('resolution'))
+                            and f.get('vcodec', 'none') != 'none'
+                            and not str(f.get('vcodec', '')).startswith('images')
                         ]
-                        tiene_hd = any((f.get('height') or 0) >= 720 for f in formatos_validos)
+                        tiene_hd = any((f.get('height') or 0) >= 720 for f in formatos_video)
                         if tiene_hd:
                             return info
-                        if formatos_validos and not info_respaldo:
+                        if formatos_video and not info_respaldo:
                             info_respaldo = info
             except Exception as error:
                 ultimo_error = error
                 texto_err = str(error).lower()
-                # Si el error ocurrió en FFmpeg/Postprocesador (después de descargar),
-                # NO repetir la descarga desde cero con otro cliente
                 if "postprocessing" in texto_err or "ffmpeg" in texto_err or "ffprobe" in texto_err:
                     raise error
                 continue
 
         if info_respaldo:
             return info_respaldo
-        raise ultimo_error or Exception("No se pudieron obtener los formatos del video.")
+        raise ultimo_error or Exception("YouTube bloqueó temporalmente la consulta. Intenta de nuevo.")
 
     def obtener_informacion_video(self, enlace_url: str) -> dict:
+        # En el análisis NO pasamos ffmpeg_location ni ignore_no_formats_error
         opciones = {
             'quiet': True,
             'no_warnings': True,
             'extract_flat': False,
             'noplaylist': True,
-            'ignore_no_formats_error': True,
             'socket_timeout': 30,
             'retries': 10,
             'nocheckcertificate': True,
         }
-
-        if self.ruta_ffmpeg:
-            opciones['ffmpeg_location'] = self.ruta_ffmpeg
 
         info = self._ejecutar_con_escudo_antibloqueo(enlace_url, opciones, descargar=False)
         formatos = info.get('formats', [])
