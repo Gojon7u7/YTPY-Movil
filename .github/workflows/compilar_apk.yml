@@ -1,4 +1,4 @@
-name: Compilar YTPY Android APK (con FFmpeg ARM64)
+name: Compilar YTPY Android APK (con FFmpeg y Deno ARM64)
 
 on:
   workflow_dispatch:
@@ -35,32 +35,43 @@ jobs:
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
           pip install --upgrade pip
           pip install flet==0.25.2
-          flet build apk --project "YTPY Studio" --description "Descargador Profesional MP4 MP3 FLAC" --no-rich-output
+          flet build apk --project "YTPY Studio" --description "Descargador Profesional MP4 MP3 FLAC" --permissions storage external_storage --no-rich-output
 
-      - name: 6. Descargar e inyectar FFmpeg ARM64 (libffmpeg.so) para Android 10+
+      - name: 6. Inyectar FFmpeg ARM64 (libffmpeg.so) y Deno ARM64 (libdeno.so)
         run: |
           sudo apt-get update && sudo apt-get install -y wget xz-utils zip unzip
           
-          # Descargar Apktool directamente desde GitHub Releases (URL estable y permanente)
+          # Instalar Apktool desde GitHub Releases
           sudo wget https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O /usr/local/bin/apktool
           sudo wget https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O /usr/local/bin/apktool.jar
           sudo chmod +x /usr/local/bin/apktool
 
+          # 1. Descargar binario estático de FFmpeg para Android ARM64
           wget -q https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz
           tar -xf ffmpeg-release-arm64-static.tar.xz
           CARPETA_FFMPEG=$(find . -maxdepth 1 -type d -name "ffmpeg-*-arm64-static" | head -n 1)
 
+          # 2. Descargar motor JavaScript Deno para ARM64 (resuelve firmas de 1080p/4K en segundo plano)
+          wget -q https://github.com/denoland/deno/releases/latest/download/deno-aarch64-unknown-linux-gnu.zip -O deno_arm64.zip
+          unzip -q deno_arm64.zip -d deno_extraido
+
+          # Desempaquetar el APK generado por Flet
           APK_ORIGINAL=$(find build/apk -name "*.apk" | head -n 1)
           apktool d -s "$APK_ORIGINAL" -o apk_modificado
 
+          # Activar extracción de binarios nativos y permisos de almacenamiento
           sed -i 's/android:extractNativeLibs="[^"]*"//g' apk_modificado/AndroidManifest.xml
           sed -i 's/android:requestLegacyExternalStorage="[^"]*"//g' apk_modificado/AndroidManifest.xml
           sed -i 's/<application/<application android:extractNativeLibs="true" android:requestLegacyExternalStorage="true"/g' apk_modificado/AndroidManifest.xml
 
+          # Inyectar FFmpeg y Deno como librerías nativas ejecutables
           mkdir -p apk_modificado/lib/arm64-v8a
           cp "$CARPETA_FFMPEG/ffmpeg" apk_modificado/lib/arm64-v8a/libffmpeg.so
+          cp "deno_extraido/deno" apk_modificado/lib/arm64-v8a/libdeno.so
           chmod 755 apk_modificado/lib/arm64-v8a/libffmpeg.so
+          chmod 755 apk_modificado/lib/arm64-v8a/libdeno.so
 
+          # Reconstruir y firmar el APK
           apktool b --use-aapt2 apk_modificado -o ytpy_sin_firmar.apk
 
           ZIPALIGN=$(find $ANDROID_HOME/build-tools -name "zipalign" | sort -V | tail -n 1)
@@ -68,7 +79,7 @@ jobs:
 
           "$ZIPALIGN" -p -f 4 ytpy_sin_firmar.apk ytpy_alineado.apk
 
-          keytool -genkey -v -keystore llave_ytpy.jks -keyalg RSA -keysize 2048 -validity 10000 -alias ytpy -storepass ytpy1234 -key-pass ytpy1234 -dname "CN=YTPY Studio, OU=Dev, O=YTPY, L=Latam, S=Latam, C=VE"
+          keytool -genkey -v -keystore llave_ytpy.jks -keyalg RSA -keysize 2048 -validity 10000 -alias ytpy -storepass ytpy1234 -keypass ytpy1234 -dname "CN=YTPY Studio, OU=Dev, O=YTPY, L=Latam, S=Latam, C=VE"
           "$APKSIGNER" sign --ks llave_ytpy.jks --ks-pass pass:ytpy1234 --key-pass pass:ytpy1234 --out YTPY_Studio_Android.apk ytpy_alineado.apk
 
       - name: 7. Subir APK listo para descargar
