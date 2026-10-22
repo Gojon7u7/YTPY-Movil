@@ -35,7 +35,7 @@ jobs:
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
           pip install --upgrade pip
           pip install flet==0.25.2
-          flet build apk --project "YTPY Studio" --description "Descargador Profesional MP4 MP3 FLAC" --permissions storage external_storage --no-rich-output
+          flet build apk --project "YTPY Studio" --description "Descargador Profesional MP4 MP3 FLAC" --android-permissions android.permission.READ_EXTERNAL_STORAGE=True android.permission.WRITE_EXTERNAL_STORAGE=True android.permission.MANAGE_EXTERNAL_STORAGE=True --no-rich-output
 
       - name: 6. Inyectar FFmpeg ARM64 (libffmpeg.so) y Deno ARM64 (libdeno.so)
         run: |
