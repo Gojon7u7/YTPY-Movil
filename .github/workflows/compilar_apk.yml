@@ -24,7 +24,7 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: 4. Configurar Flutter SDK (Versión exacta compatible con Flet 0.24.1 y Gradle 8.7)
+      - name: 4. Configurar Flutter SDK (Versión 3.24.3)
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.24.3'
@@ -34,38 +34,32 @@ jobs:
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
           pip install --upgrade pip
-          pip install flet==0.24.1
+          pip install flet==0.25.2
           flet build apk --project "YTPY Studio" --description "Descargador Profesional MP4 MP3 FLAC" --no-rich-output
 
       - name: 6. Descargar e inyectar FFmpeg ARM64 (libffmpeg.so) para Android 10+
         run: |
           sudo apt-get update && sudo apt-get install -y wget xz-utils zip unzip
           
-          # Instalar Apktool para editar AndroidManifest.xml sin tocar el código compilado (-s)
           sudo wget https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O /usr/local/bin/apktool
           sudo wget https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar -O /usr/local/bin/apktool.jar
           sudo chmod +x /usr/local/bin/apktool
 
-          # Descargar binario estático de FFmpeg para procesadores móviles ARM64 (aarch64)
           wget -q https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz
           tar -xf ffmpeg-release-arm64-static.tar.xz
           CARPETA_FFMPEG=$(find . -maxdepth 1 -type d -name "ffmpeg-*-arm64-static" | head -n 1)
 
-          # Desempaquetar recursos del APK generado por Flet
           APK_ORIGINAL=$(find build/apk -name "*.apk" | head -n 1)
           apktool d -s "$APK_ORIGINAL" -o apk_modificado
 
-          # Limpiar atributos previos para evitar duplicados y activar extracción nativa en Android 10+
           sed -i 's/android:extractNativeLibs="[^"]*"//g' apk_modificado/AndroidManifest.xml
           sed -i 's/android:requestLegacyExternalStorage="[^"]*"//g' apk_modificado/AndroidManifest.xml
           sed -i 's/<application/<application android:extractNativeLibs="true" android:requestLegacyExternalStorage="true"/g' apk_modificado/AndroidManifest.xml
 
-          # Inyectar FFmpeg como librería nativa ejecutable (libffmpeg.so)
           mkdir -p apk_modificado/lib/arm64-v8a
           cp "$CARPETA_FFMPEG/ffmpeg" apk_modificado/lib/arm64-v8a/libffmpeg.so
           chmod 755 apk_modificado/lib/arm64-v8a/libffmpeg.so
 
-          # Reconstruir, alinear en memoria (zipalign) y firmar el APK final
           apktool b --use-aapt2 apk_modificado -o ytpy_sin_firmar.apk
 
           ZIPALIGN=$(find $ANDROID_HOME/build-tools -name "zipalign" | sort -V | tail -n 1)
@@ -73,7 +67,7 @@ jobs:
 
           "$ZIPALIGN" -p -f 4 ytpy_sin_firmar.apk ytpy_alineado.apk
 
-          keytool -genkey -v -keystore llave_ytpy.jks -keyalg RSA -keysize 2048 -validity 10000 -alias ytpy -storepass ytpy1234 -keypass ytpy1234 -dname "CN=YTPY Studio, OU=Dev, O=YTPY, L=Latam, S=Latam, C=VE"
+          keytool -genkey -v -keystore llave_ytpy.jks -keyalg RSA -keysize 2048 -validity 10000 -alias ytpy -storepass ytpy1234 -key-pass ytpy1234 "CN=YTPY Studio, OU=Dev, O=YTPY, L=Latam, S=Latam, C=VE"
           "$APKSIGNER" sign --ks llave_ytpy.jks --ks-pass pass:ytpy1234 --key-pass pass:ytpy1234 --out YTPY_Studio_Android.apk ytpy_alineado.apk
 
       - name: 7. Subir APK listo para descargar
