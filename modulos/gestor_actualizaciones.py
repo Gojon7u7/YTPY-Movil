@@ -1,20 +1,21 @@
 import os
 import json
+import shutil
 import zipfile
-import importlib
 from io import BytesIO
 import requests
 
 
 class GestorActualizacionesMovil:
     """
-    Mantiene yt-dlp y yt-dlp-ejs actualizados a la última versión dentro
-    del teléfono Android sin necesidad de reinstalar el archivo APK.
+    Mantiene yt-dlp y yt-dlp-ejs actualizados para el siguiente inicio de la app
+    sin interrumpir ni corromper las descargas en curso.
     """
 
     def __init__(self, ruta_datos_app: str):
         self.ruta_datos_app = ruta_datos_app
         self.ruta_librerias = os.path.join(self.ruta_datos_app, "herramientas", "librerias")
+        self.ruta_temporal = os.path.join(self.ruta_datos_app, "herramientas", "temp_update")
         self.archivo_versiones = os.path.join(self.ruta_datos_app, "herramientas", "versiones.json")
         os.makedirs(self.ruta_librerias, exist_ok=True)
 
@@ -36,16 +37,8 @@ class GestorActualizacionesMovil:
 
     def verificar_y_actualizar_silenciosamente(self):
         versiones = self._leer_versiones()
-        actualizo_yt = self._actualizar_paquete_pypi("yt-dlp", versiones)
-        actualizo_ejs = self._actualizar_paquete_pypi("yt-dlp-ejs", versiones)
-
-        if actualizo_yt or actualizo_ejs:
-            try:
-                import yt_dlp
-                importlib.reload(yt_dlp)
-            except Exception:
-                pass
-
+        self._actualizar_paquete_pypi("yt-dlp", versiones)
+        self._actualizar_paquete_pypi("yt-dlp-ejs", versiones)
         self._guardar_versiones(versiones)
 
     def _actualizar_paquete_pypi(self, nombre_paquete: str, registro: dict) -> bool:
@@ -72,9 +65,22 @@ class GestorActualizacionesMovil:
                 return False
 
             descarga = requests.get(url_wheel, timeout=30)
-            with zipfile.ZipFile(BytesIO(descarga.content)) as zf:
-                zf.extractall(self.ruta_librerias)
+            shutil.rmtree(self.ruta_temporal, ignore_errors=True)
+            os.makedirs(self.ruta_temporal, exist_ok=True)
 
+            with zipfile.ZipFile(BytesIO(descarga.content)) as zf:
+                zf.extractall(self.ruta_temporal)
+
+            for item in os.listdir(self.ruta_temporal):
+                origen = os.path.join(self.ruta_temporal, item)
+                destino = os.path.join(self.ruta_librerias, item)
+                if os.path.isdir(origen):
+                    shutil.rmtree(destino, ignore_errors=True)
+                    shutil.move(origen, destino)
+                else:
+                    shutil.move(origen, destino)
+
+            shutil.rmtree(self.ruta_temporal, ignore_errors=True)
             registro[nombre_paquete] = version_remota
             return True
         except Exception:
