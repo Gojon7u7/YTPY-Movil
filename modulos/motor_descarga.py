@@ -1,15 +1,20 @@
 import os
 import re
 import sys
+import stat
 import shutil
+import subprocess
 import yt_dlp
+
+
+_POPEN_ORIGINAL = subprocess.Popen
 
 
 class MotorDescargaMovil:
     """
     Motor de extracción y descarga para Android 10+ y PC.
-    Enlaza libffmpeg.so y libdeno.so en Android y aísla los clientes
-    para evitar el error 'The page needs to be reloaded'.
+    Incluye redirección de subprocesos en Android para ejecutar libffmpeg.so
+    y libffprobe.so desde la partición nativa autorizada del APK.
     """
 
     def __init__(self, ruta_datos_privados: str):
@@ -20,13 +25,13 @@ class MotorDescargaMovil:
             or (sys.platform == "linux" and os.path.exists("/storage/emulated/0"))
         )
 
-        # En PC: asegurar que la carpeta Scripts del entorno virtual esté en el PATH
         carpeta_scripts_venv = os.path.dirname(sys.executable)
         if carpeta_scripts_venv and carpeta_scripts_venv not in os.environ.get("PATH", ""):
             os.environ["PATH"] = carpeta_scripts_venv + os.pathsep + os.environ.get("PATH", "")
 
         self.ruta_descargas = self._configurar_carpeta_descargas()
         self.ruta_archivo_cookies = os.path.join(self.ruta_datos_privados, "cookies_youtube.txt")
+        self.mapa_binarios_android = {}
         self.ruta_ffmpeg = self._configurar_binarios_nativos()
 
     def _configurar_carpeta_descargas(self) -> str:
@@ -50,11 +55,44 @@ class MotorDescargaMovil:
         os.makedirs(ruta_local, exist_ok=True)
         return ruta_local
 
+    def _activar_interceptor_popen_android(self, ruta_real_ffmpeg: str, ruta_real_ffprobe: str):
+        """
+        En Android 10+, yt-dlp exige que los archivos se llamen 'ffmpeg' y 'ffprobe',
+        pero Android solo permite ejecutar archivos llamados 'lib*.so' en la carpeta nativa.
+        Este interceptor traduce en tiempo real cualquier llamada de 'ffmpeg' -> 'libffmpeg.so'
+        y 'ffprobe' -> 'libffprobe.so'.
+        """
+        class PopenPuenteAndroid(_POPEN_ORIGINAL):
+            def __init__(self_popen, args, *pargs, **kwargs):
+                if isinstance(args, (list, tuple)) and len(args) > 0:
+                    ejecutable = str(args[0])
+                    nombre_base = os.path.basename(ejecutable).lower()
+                    if nombre_base in ("ffmpeg", "libffmpeg.so") and os.path.exists(ruta_real_ffmpeg):
+                        args = [ruta_real_ffmpeg] + list(args[1:])
+                    elif nombre_base in ("ffprobe", "libffprobe.so") and os.path.exists(ruta_real_ffprobe):
+                        args = [ruta_real_ffprobe] + list(args[1:])
+                elif isinstance(args, str):
+                    if "ffmpeg" in args and os.path.exists(ruta_real_ffmpeg):
+                        args = args.replace("ffmpeg", ruta_real_ffmpeg, 1)
+                super().__init__(args, *pargs, **kwargs)
+
+        subprocess.Popen = PopenPuenteAndroid
+
+        # Forzar permisos de lectura/ejecución para el detector os.access de yt-dlp
+        acceso_original = os.access
+
+        def acceso_puente(ruta, modo, *args, **kwargs):
+            nombre = os.path.basename(str(ruta)).lower()
+            if nombre in ("ffmpeg", "ffprobe", "libffmpeg.so", "libffprobe.so"):
+                return True
+            return acceso_original(ruta, modo, *args, **kwargs)
+
+        os.access = acceso_puente
+
     def _configurar_binarios_nativos(self) -> str:
         """
-        En Android localiza la carpeta nativa (/data/app/.../lib/arm64) donde están
-        libffmpeg.so y libdeno.so, y crea enlaces simbólicos llamados 'ffmpeg' y 'deno'
-        para que yt-dlp los reconozca por su nombre estándar.
+        Localiza libffmpeg.so y libffprobe.so en Android y prepara la carpeta puente
+        para que yt-dlp supere su validación y ejecute los binarios nativos.
         """
         if self.es_android and os.path.exists("/proc/self/maps"):
             try:
@@ -69,31 +107,36 @@ class MotorDescargaMovil:
                                 break
 
                 if carpeta_nativa:
-                    # Crear carpeta puente con enlaces simbólicos llamados 'ffmpeg' y 'deno'
+                    origen_ffmpeg = os.path.join(carpeta_nativa, "libffmpeg.so")
+                    origen_ffprobe = os.path.join(carpeta_nativa, "libffprobe.so")
+                    if not os.path.exists(origen_ffprobe):
+                        origen_ffprobe = origen_ffmpeg
+
+                    # Crear archivos marcadores llamados exactamente 'ffmpeg' y 'ffprobe'
+                    # (NO symlinks, para que os.path.realpath no les cambie el nombre a .so)
                     carpeta_puente = os.path.join(self.ruta_datos_privados, "bin_puente")
                     os.makedirs(carpeta_puente, exist_ok=True)
 
-                    origen_ffmpeg = os.path.join(carpeta_nativa, "libffmpeg.so")
-                    enlace_ffmpeg = os.path.join(carpeta_puente, "ffmpeg")
-                    if os.path.exists(origen_ffmpeg):
-                        if os.path.lexists(enlace_ffmpeg):
-                            os.remove(enlace_ffmpeg)
-                        os.symlink(origen_ffmpeg, enlace_ffmpeg)
+                    for nombre_bin in ("ffmpeg", "ffprobe"):
+                        ruta_marcador = os.path.join(carpeta_puente, nombre_bin)
+                        if os.path.lexists(ruta_marcador):
+                            try:
+                                os.remove(ruta_marcador)
+                            except Exception:
+                                pass
+                        with open(ruta_marcador, "wb") as f:
+                            f.write(b"#!/system/bin/sh\n")
+                        try:
+                            os.chmod(ruta_marcador, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP)
+                        except Exception:
+                            pass
 
-                    origen_deno = os.path.join(carpeta_nativa, "libdeno.so")
-                    enlace_deno = os.path.join(carpeta_puente, "deno")
-                    if os.path.exists(origen_deno):
-                        if os.path.lexists(enlace_deno):
-                            os.remove(enlace_deno)
-                        os.symlink(origen_deno, enlace_deno)
+                    self._activar_interceptor_popen_android(origen_ffmpeg, origen_ffprobe)
 
-                    for dir_bin in [carpeta_puente, carpeta_nativa]:
-                        if dir_bin not in os.environ.get("PATH", ""):
-                            os.environ["PATH"] = dir_bin + os.pathsep + os.environ.get("PATH", "")
+                    if carpeta_puente not in os.environ.get("PATH", ""):
+                        os.environ["PATH"] = carpeta_puente + os.pathsep + os.environ.get("PATH", "")
 
-                    if os.path.exists(enlace_ffmpeg):
-                        return enlace_ffmpeg
-                    return origen_ffmpeg
+                    return carpeta_puente
             except Exception:
                 pass
 
@@ -129,14 +172,10 @@ class MotorDescargaMovil:
         return re.compile(r'\x1b\[[0-9;]*m').sub('', str(texto)).strip()
 
     def _ejecutar_con_escudo_antibloqueo(self, enlace_url: str, opciones_base: dict, descargar: bool):
-        """
-        Prueba cada cliente de forma individual y aislada (sin mezclar con tv_embedded)
-        para que ningún cliente secundario dispare 'The page needs to be reloaded'.
-        """
         enlace_limpio = self._limpiar_enlace_youtube(enlace_url)
 
         estrategias = [
-            # Estrategia 1: android_vr en solitario (Desbloquea 1080p/60FPS directo en Android y PC)
+            # Estrategia 1: android_vr (El cliente que desbloqueó tus 4 calidades en el video)
             {
                 'extractor_args': {
                     'youtube': {
@@ -144,9 +183,7 @@ class MotorDescargaMovil:
                     }
                 }
             },
-            # Estrategia 2: Cliente nativo con Deno en segundo plano
-            {},
-            # Estrategia 3: Cliente Android Creator en solitario
+            # Estrategia 2: android_creator
             {
                 'extractor_args': {
                     'youtube': {
@@ -154,14 +191,8 @@ class MotorDescargaMovil:
                     }
                 }
             },
-            # Estrategia 4: Cliente Web Móvil (mweb) en solitario
-            {
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['mweb']
-                    }
-                }
-            },
+            # Estrategia 3: Cliente nativo por defecto
+            {},
         ]
 
         if not self.es_android:
@@ -195,6 +226,11 @@ class MotorDescargaMovil:
                             info_respaldo = info
             except Exception as error:
                 ultimo_error = error
+                texto_err = str(error).lower()
+                # Si el error ocurrió en FFmpeg/Postprocesador (después de descargar),
+                # NO repetir la descarga desde cero con otro cliente
+                if "postprocessing" in texto_err or "ffmpeg" in texto_err or "ffprobe" in texto_err:
+                    raise error
                 continue
 
         if info_respaldo:
@@ -273,7 +309,7 @@ class MotorDescargaMovil:
                 eta = self._limpiar_ansi(datos.get('_eta_str', '--:--'))
                 funcion_progreso(porcentaje, velocidad, eta, "Descargando...")
             elif datos['status'] == 'finished':
-                funcion_progreso(1.0, "---", "00:00", "Uniendo y procesando archivo final...")
+                funcion_progreso(1.0, "---", "00:00", "Uniendo y convirtiendo con FFmpeg...")
 
         opciones = {
             'noplaylist': True,
@@ -295,43 +331,31 @@ class MotorDescargaMovil:
 
         if modo_formato == "MP4":
             altura = int(valor_calidad)
-            if self.ruta_ffmpeg:
-                opciones['format'] = (
-                    f"bestvideo[height={altura}][ext=mp4]+bestaudio[ext=m4a]/"
-                    f"bestvideo[height={altura}]+bestaudio/"
-                    f"best[height={altura}]/"
-                    f"bestvideo[height<={altura}]+bestaudio/best"
-                )
-                opciones['merge_output_format'] = 'mp4'
-            else:
-                opciones['format'] = f"best[height<={altura}][ext=mp4]/best[ext=mp4]/best"
-
+            opciones['format'] = (
+                f"bestvideo[height={altura}][ext=mp4]+bestaudio[ext=m4a]/"
+                f"bestvideo[height={altura}]+bestaudio/"
+                f"best[height={altura}]/"
+                f"bestvideo[height<={altura}]+bestaudio/best"
+            )
+            opciones['merge_output_format'] = 'mp4'
             opciones['outtmpl'] = os.path.join(self.ruta_descargas, '%(title)s [%(height)sp].%(ext)s')
 
         elif modo_formato == "MP3":
-            if self.ruta_ffmpeg:
-                opciones['format'] = 'bestaudio/best'
-                opciones['postprocessors'] = [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': str(valor_calidad),
-                }]
-                opciones['outtmpl'] = os.path.join(self.ruta_descargas, f'%(title)s [MP3 {valor_calidad}kbps].%(ext)s')
-            else:
-                opciones['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
-                opciones['outtmpl'] = os.path.join(self.ruta_descargas, '%(title)s [Audio].%(ext)s')
+            opciones['format'] = 'bestaudio/best'
+            opciones['postprocessors'] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': str(valor_calidad),
+            }]
+            opciones['outtmpl'] = os.path.join(self.ruta_descargas, f'%(title)s [MP3 {valor_calidad}kbps].%(ext)s')
 
         elif modo_formato == "FLAC":
-            if self.ruta_ffmpeg:
-                opciones['format'] = 'bestaudio/best'
-                opciones['postprocessors'] = [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'flac',
-                }]
-                opciones['outtmpl'] = os.path.join(self.ruta_descargas, '%(title)s [FLAC Lossless].%(ext)s')
-            else:
-                opciones['format'] = 'bestaudio/best'
-                opciones['outtmpl'] = os.path.join(self.ruta_descargas, '%(title)s [Audio Lossless].%(ext)s')
+            opciones['format'] = 'bestaudio/best'
+            opciones['postprocessors'] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'flac',
+            }]
+            opciones['outtmpl'] = os.path.join(self.ruta_descargas, '%(title)s [FLAC Lossless].%(ext)s')
 
         try:
             self._ejecutar_con_escudo_antibloqueo(enlace_url, opciones, descargar=True)
