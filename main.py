@@ -5,13 +5,11 @@ import flet as ft
 
 
 def obtener_directorio_datos() -> str:
-    """Obtiene la carpeta privada escribible tanto en Android como en PC."""
     ruta_flet = os.environ.get("FLET_APP_STORAGE_DATA")
     if ruta_flet:
         os.makedirs(ruta_flet, exist_ok=True)
         return ruta_flet
-    ruta_pc = os.path.dirname(os.path.abspath(__file__))
-    return ruta_pc
+    return os.path.dirname(os.path.abspath(__file__))
 
 
 def configurar_librerias_autoactualizables(ruta_datos: str):
@@ -30,14 +28,13 @@ def main(pagina: ft.Page):
 
     motor = MotorDescargaMovil(ruta_datos)
 
-    # Configuración visual de la app móvil
     pagina.title = "YTPY Studio Mobile"
     pagina.theme_mode = ft.ThemeMode.DARK
     pagina.bgcolor = "#0f0f14"
     pagina.padding = 16
     pagina.scroll = ft.ScrollMode.ADAPTIVE
-    pagina.window.width = 410
-    pagina.window.height = 800
+    pagina.window.width = 420
+    pagina.window.height = 820
 
     estado_app = {
         "datos_video": None,
@@ -51,7 +48,6 @@ def main(pagina: ft.Page):
         "128 kbps (Ligero)": "128",
     }
 
-    # Lanzar actualización silenciosa de yt-dlp al abrir la app
     def actualizar_en_segundo_plano():
         try:
             gestor = GestorActualizacionesMovil(ruta_datos)
@@ -62,13 +58,13 @@ def main(pagina: ft.Page):
     threading.Thread(target=actualizar_en_segundo_plano, daemon=True).start()
 
     # =========================================================================
-    # MODAL DE COOKIES (ESCUDO EXTRA PARA VIDEOS +18 O BLOQUEADOS)
+    # MODAL DE COOKIES
     # =========================================================================
     campo_cookies = ft.TextField(
         multiline=True,
         min_lines=5,
         max_lines=8,
-        hint_text="Pega aquí el contenido de tu archivo cookies.txt (formato Netscape) si deseas descargar videos privados o +18...",
+        hint_text="Pega aquí el contenido de tu archivo cookies.txt (formato Netscape) si necesitas descargar videos con restricción de edad...",
         text_size=12,
         bgcolor="#101017",
         border_color="#2e2e42",
@@ -77,7 +73,7 @@ def main(pagina: ft.Page):
     def guardar_cookies_modal(e):
         motor.guardar_cookies_texto(campo_cookies.value or "")
         dialogo_cookies.open = False
-        texto_estado.value = "Cookies guardadas correctamente en el escudo anti-bloqueo."
+        texto_estado.value = "Cookies guardadas correctamente en el escudo."
         texto_estado.color = "#2a9d8f"
         pagina.update()
 
@@ -91,12 +87,8 @@ def main(pagina: ft.Page):
     )
     pagina.overlay.append(dialogo_cookies)
 
-    def abrir_modal_cookies(e):
-        dialogo_cookies.open = True
-        pagina.update()
-
     # =========================================================================
-    # ELEMENTOS VISUALES DE LA INTERFAZ
+    # CONTROLES DE LA INTERFAZ
     # =========================================================================
     encabezado = ft.Row(
         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -111,8 +103,8 @@ def main(pagina: ft.Page):
             ft.IconButton(
                 icon=ft.icons.SHIELD_OUTLINED,
                 icon_color="#3a86ff",
-                tooltip="Configurar Cookies Anti-Bloqueo",
-                on_click=abrir_modal_cookies,
+                tooltip="Configurar Cookies",
+                on_click=lambda _: setattr(dialogo_cookies, 'open', True) or pagina.update(),
             ),
         ],
     )
@@ -152,7 +144,7 @@ def main(pagina: ft.Page):
     )
 
     imagen_miniatura = ft.Image(
-        src="https://via.placeholder.com/320x180.png?text=YTPY+Studio",
+        src="https://via.placeholder.com/320x180.png?text=YTPY",
         width=360,
         height=180,
         fit=ft.ImageFit.COVER,
@@ -190,7 +182,7 @@ def main(pagina: ft.Page):
         border_color="#2e2e42",
         border_radius=10,
         disabled=True,
-        options=[ft.dropdown.Option("Analiza un video primero")],
+        options=[ft.dropdown.Option(key="Analiza un video primero", text="Analiza un video primero")],
         value="Analiza un video primero",
     )
 
@@ -204,7 +196,6 @@ def main(pagina: ft.Page):
         style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
     )
 
-    # Botones de selección de formato (MP4 / MP3 / FLAC)
     def cambiar_formato(modo: str):
         estado_app["modo_formato"] = modo
         btn_mp4.bgcolor = "#3a86ff" if modo == "MP4" else "#20202e"
@@ -215,30 +206,37 @@ def main(pagina: ft.Page):
             pagina.update()
             return
 
+        # Limpiar el valor previo antes de asignar las nuevas opciones para forzar el refresco en Android
+        menu_calidades.value = None
+
         if modo == "MP4":
-            etiquetas = estado_app["datos_video"]["lista_etiquetas"]
-            menu_calidades.label = "Resolución de video original"
-            menu_calidades.options = [ft.dropdown.Option(et) for et in etiquetas]
-            menu_calidades.value = etiquetas[0] if etiquetas else ""
+            etiquetas = estado_app["datos_video"].get("lista_etiquetas", [])
+            menu_calidades.label = f"Resolución original ({len(etiquetas)} disponibles)"
+            menu_calidades.options = [ft.dropdown.Option(key=et, text=et) for et in etiquetas]
+            menu_calidades.value = etiquetas[0] if etiquetas else None
             boton_descargar.text = "Descargar Video en MP4"
             boton_descargar.bgcolor = "#2a9d8f"
             barra_progreso.color = "#2a9d8f"
+
         elif modo == "MP3":
             opciones = list(calidades_mp3.keys())
             menu_calidades.label = "Calidad de audio MP3"
-            menu_calidades.options = [ft.dropdown.Option(op) for op in opciones]
+            menu_calidades.options = [ft.dropdown.Option(key=op, text=op) for op in opciones]
             menu_calidades.value = opciones[0]
             boton_descargar.text = "Descargar Audio en MP3"
             boton_descargar.bgcolor = "#3a86ff"
             barra_progreso.color = "#3a86ff"
+
         else:
+            texto_flac = "FLAC Sin Pérdida (Lossless)"
             menu_calidades.label = "Calidad de estudio"
-            menu_calidades.options = [ft.dropdown.Option("FLAC Sin Pérdida (Lossless)")]
-            menu_calidades.value = "FLAC Sin Pérdida (Lossless)"
+            menu_calidades.options = [ft.dropdown.Option(key=texto_flac, text=texto_flac)]
+            menu_calidades.value = texto_flac
             boton_descargar.text = "Descargar Audio en FLAC"
             boton_descargar.bgcolor = "#8338ec"
             barra_progreso.color = "#8338ec"
 
+        menu_calidades.update()
         pagina.update()
 
     btn_mp4 = ft.ElevatedButton("Video MP4", bgcolor="#3a86ff", color="#ffffff", expand=True, on_click=lambda _: cambiar_formato("MP4"))
@@ -247,15 +245,11 @@ def main(pagina: ft.Page):
 
     fila_formatos = ft.Row(controls=[btn_mp4, btn_mp3, btn_flac], spacing=8)
 
-    # Panel de Progreso
     texto_estado = ft.Text("Listo para comenzar.", size=13, weight=ft.FontWeight.BOLD, color="#a8dadc")
     texto_estadisticas = ft.Text("0% • Velocidad: --- • ETA: --:--", size=11, color="#8a8a9e")
     barra_progreso = ft.ProgressBar(value=0.0, bgcolor="#101017", color="#2a9d8f", height=10, border_radius=5)
     texto_ruta_guardado = ft.Text(f"Carpeta destino: {motor.ruta_descargas}", size=11, color="#6c6c80")
 
-    # =========================================================================
-    # LÓGICA DE ANÁLISIS Y DESCARGA EN HILOS SECUNDARIOS
-    # =========================================================================
     def iniciar_analisis(e):
         enlace = (entrada_url.value or "").strip()
         if not enlace:
@@ -268,8 +262,8 @@ def main(pagina: ft.Page):
         boton_analizar.text = "Analizando..."
         boton_descargar.disabled = True
         menu_calidades.disabled = True
-        barra_progreso.value = None  # Animación indeterminada fluida
-        texto_estado.value = "Desbloqueando flujos originales de YouTube..."
+        barra_progreso.value = None
+        texto_estado.value = "Desbloqueando flujos originales 1080p/60FPS..."
         texto_estado.color = "#a8dadc"
         pagina.update()
 
@@ -291,8 +285,9 @@ def main(pagina: ft.Page):
                 boton_descargar.disabled = False
                 cambiar_formato(estado_app["modo_formato"])
 
+                cantidad = len(datos.get("lista_etiquetas", []))
                 barra_progreso.value = 0.0
-                texto_estado.value = "Video analizado con éxito. Selecciona calidad y descarga."
+                texto_estado.value = f"¡Éxito! {cantidad} calidades de video desbloqueadas."
                 texto_estado.color = "#2a9d8f"
             except Exception as err:
                 barra_progreso.value = 0.0
@@ -314,7 +309,14 @@ def main(pagina: ft.Page):
         seleccion = menu_calidades.value
 
         if modo == "MP4":
-            valor_calidad = estado_app["datos_video"]["resoluciones"].get(seleccion, 720)
+            mapa_res = estado_app["datos_video"]["resoluciones"]
+            etiquetas = estado_app["datos_video"]["lista_etiquetas"]
+            if seleccion in mapa_res:
+                valor_calidad = mapa_res[seleccion]
+            elif etiquetas:
+                valor_calidad = mapa_res[etiquetas[0]]
+            else:
+                valor_calidad = 1080
         elif modo == "MP3":
             valor_calidad = calidades_mp3.get(seleccion, "320")
         else:
@@ -346,7 +348,7 @@ def main(pagina: ft.Page):
             pagina.update()
 
         def cb_error(msg_error):
-            texto_estado.value = f"Error: {msg_error[:70]}"
+            texto_estado.value = f"Error: {msg_error[:75]}"
             texto_estado.color = "#e63946"
             boton_analizar.disabled = False
             boton_descargar.disabled = False
@@ -363,7 +365,6 @@ def main(pagina: ft.Page):
     boton_analizar.on_click = iniciar_analisis
     boton_descargar.on_click = iniciar_descarga
 
-    # Construcción de las tarjetas en pantalla
     tarjeta_busqueda = ft.Container(
         bgcolor="#181822",
         border=ft.border.all(1, "#262636"),
@@ -386,7 +387,7 @@ def main(pagina: ft.Page):
         content=ft.Column(
             spacing=12,
             controls=[
-                ft.Container(alignment=ft.alignment.center, content= ft.Column([placeholder_miniatura, imagen_miniatura])),
+                ft.Container(alignment=ft.alignment.center, content=ft.Column([placeholder_miniatura, imagen_miniatura])),
                 texto_titulo_video,
                 texto_metadatos,
                 fila_formatos,
