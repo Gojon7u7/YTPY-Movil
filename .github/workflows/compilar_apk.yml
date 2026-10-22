@@ -37,7 +37,7 @@ jobs:
           pip install flet==0.25.2
           flet build apk --project "YTPY Studio" --description "Descargador Profesional MP4 MP3 FLAC" --android-permissions android.permission.READ_EXTERNAL_STORAGE=True android.permission.WRITE_EXTERNAL_STORAGE=True android.permission.MANAGE_EXTERNAL_STORAGE=True --no-rich-output
 
-      - name: 6. Inyectar FFmpeg y FFprobe ARM64 (musl static compatible con Android)
+      - name: 6. Inyectar FFmpeg y FFprobe (ARM64 para Celular y x86_64 para Emulador LDPlayer)
         run: |
           sudo apt-get update && sudo apt-get install -y wget xz-utils zip unzip
           
@@ -46,12 +46,19 @@ jobs:
           sudo wget https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O /usr/local/bin/apktool.jar
           sudo chmod +x /usr/local/bin/apktool
 
-          # Extraer binarios ARM64 estáticos (musl) compatibles con el kernel de Android 10+
+          # 1. Extraer binarios ARM64 estáticos (para teléfonos reales)
           docker pull --platform linux/arm64 mwader/static-ffmpeg:7.1
-          ID_CONT=$(docker create --platform linux/arm64 mwader/static-ffmpeg:7.1)
-          docker cp "$ID_CONT:/ffmpeg" ./ffmpeg_arm64
-          docker cp "$ID_CONT:/ffprobe" ./ffprobe_arm64
-          docker rm "$ID_CONT"
+          ID_ARM=$(docker create --platform linux/arm64 mwader/static-ffmpeg:7.1)
+          docker cp "$ID_ARM:/ffmpeg" ./ffmpeg_arm64
+          docker cp "$ID_ARM:/ffprobe" ./ffprobe_arm64
+          docker rm "$ID_ARM"
+
+          # 2. Extraer binarios x86_64 estáticos (para emulador LDPlayer en PC)
+          docker pull --platform linux/amd64 mwader/static-ffmpeg:7.1
+          ID_X86=$(docker create --platform linux/amd64 mwader/static-ffmpeg:7.1)
+          docker cp "$ID_X86:/ffmpeg" ./ffmpeg_x86_64
+          docker cp "$ID_X86:/ffprobe" ./ffprobe_x86_64
+          docker rm "$ID_X86"
 
           # Desempaquetar el APK generado por Flet
           APK_ORIGINAL=$(find build/apk -name "*.apk" | head -n 1)
@@ -62,12 +69,14 @@ jobs:
           sed -i 's/android:requestLegacyExternalStorage="[^"]*"//g' apk_modificado/AndroidManifest.xml
           sed -i 's/<application/<application android:extractNativeLibs="true" android:requestLegacyExternalStorage="true"/g' apk_modificado/AndroidManifest.xml
 
-          # Inyectar libffmpeg.so y libffprobe.so en la partición ejecutable de Android
-          mkdir -p apk_modificado/lib/arm64-v8a
+          # Inyectar para Celulares (arm64-v8a) y para Emuladores en PC (x86_64)
+          mkdir -p apk_modificado/lib/arm64-v8a apk_modificado/lib/x86_64
           cp ./ffmpeg_arm64 apk_modificado/lib/arm64-v8a/libffmpeg.so
           cp ./ffprobe_arm64 apk_modificado/lib/arm64-v8a/libffprobe.so
-          chmod 755 apk_modificado/lib/arm64-v8a/libffmpeg.so
-          chmod 755 apk_modificado/lib/arm64-v8a/libffprobe.so
+          cp ./ffmpeg_x86_64 apk_modificado/lib/x86_64/libffmpeg.so
+          cp ./ffprobe_x86_64 apk_modificado/lib/x86_64/libffprobe.so
+          chmod 755 apk_modificado/lib/arm64-v8a/libffmpeg.so apk_modificado/lib/arm64-v8a/libffprobe.so
+          chmod 755 apk_modificado/lib/x86_64/libffmpeg.so apk_modificado/lib/x86_64/libffprobe.so
 
           # Reconstruir y firmar el APK
           apktool b --use-aapt2 apk_modificado -o ytpy_sin_firmar.apk
