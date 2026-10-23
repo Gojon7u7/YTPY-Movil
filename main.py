@@ -263,7 +263,7 @@ def main(pagina: ft.Page):
         boton_descargar.disabled = True
         menu_calidades.disabled = True
         barra_progreso.value = None
-        texto_estado.value = "Desbloqueando flujos originales 1080p/60FPS..."
+        texto_estado.value = "Extrayendo metadatos y resoluciones del enlace...."
         texto_estado.color = "#a8dadc"
         pagina.update()
 
@@ -287,7 +287,7 @@ def main(pagina: ft.Page):
 
                 cantidad = len(datos.get("lista_etiquetas", []))
                 barra_progreso.value = 0.0
-                texto_estado.value = f"¡Éxito! {cantidad} calidades de video desbloqueadas."
+                texto_estado.value = f"Video cargado. Hay {cantidad} opciones de calidad disponibles."
                 texto_estado.color = "#2a9d8f"
             except Exception as err:
                 barra_progreso.value = 0.0
